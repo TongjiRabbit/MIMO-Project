@@ -1,7 +1,7 @@
 clc;
 clear all;
 close all;
-idx_rxtx_diedai_max =1;
+idx_rxtx_diedai_max =1;%%按照文章，迭代3-5次即可
 shoulian = zeros(21,4,2,1);
 idx_sadian = 0;
 for sadian = 1
