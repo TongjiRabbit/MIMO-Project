@@ -88,6 +88,24 @@ def _extract_user_indices(sample, usrnum=None):
     return arr
 
 
+def normalize_p_pred_flat_ri(y_pred_flat_ri, usrnum, frenum, eps=1e-9):
+    """对预测P做逐用户行功率归一化；输入/输出均为展平RI拼接向量。"""
+    half = y_pred_flat_ri.size // 2
+    p_real = y_pred_flat_ri[:half].reshape((usrnum, frenum), order='C')
+    p_imag = y_pred_flat_ri[half:].reshape((usrnum, frenum), order='C')
+    p_complex = p_real + 1j * p_imag
+
+    for i in range(usrnum):
+        current_p = p_complex[i, :]
+        current_power = float(np.sum(np.abs(current_p) ** 2))
+        if current_power > eps:
+            p_complex[i, :] = current_p * np.sqrt(float(frenum) / current_power)
+
+    p_real_norm = np.real(p_complex).reshape(-1, order='C')
+    p_imag_norm = np.imag(p_complex).reshape(-1, order='C')
+    return np.concatenate((p_real_norm, p_imag_norm))
+
+
 def p_flat_ri_to_matrices(y_flat_ri, usrnum, frenum):
     """将 DNN 输出的展平 RI 拼接向量逆变换回矩阵形式。
 
@@ -255,11 +273,14 @@ def main():
             # x_tensor = torch.FloatTensor(x_vec).unsqueeze(0).to(DEVICE)
 
             # 模型预测
-            y_pred_flat_ri = model(x_tensor).cpu().numpy().squeeze().astype(np.float64, copy=False)
+            y_pred = model(x_tensor).cpu().numpy().squeeze().astype(np.float64, copy=False)
+
+            # --- 预测P功率归一化（逐用户行） ---
+            y_pred_norm = normalize_p_pred_flat_ri(y_pred, usrnum=usrnum, frenum=frenum)
 
             # 后处理：用于指标计算的复数向量（展平）
-            mid = len(y_pred_flat_ri) // 2
-            p_pred_complex = y_pred_flat_ri[:mid] + 1j * y_pred_flat_ri[mid:]
+            mid = len(y_pred_norm) // 2
+            p_pred_complex = y_pred_norm[:mid] + 1j * y_pred_norm[mid:]
             p_true_complex = p_real_true.flatten(order='C') + 1j * p_imag_true.flatten(order='C')
 
             # 计算指标
@@ -269,7 +290,7 @@ def main():
             p_true_power = np.mean(np.abs(p_true_complex)**2)
 
             # --- 收集导出数据（保持展平，不复原为矩阵） ---
-            p_pred_flat_ri_list.append(y_pred_flat_ri)
+            p_pred_flat_ri_list.append(y_pred_norm)
             p_true_flat_ri_list.append(
                 np.concatenate((p_real_true.flatten(order='C'), p_imag_true.flatten(order='C'))).astype(np.float64, copy=False)
             )
@@ -279,8 +300,8 @@ def main():
             user_idx = _extract_user_indices(sample, usrnum=usrnum)
             user_indices_list.append(user_idx if user_idx is not None else np.zeros((usrnum,), dtype=np.int64))
 
-            # 仅用于“保存”的逆操作：把预测P向量转回矩阵形式（保持模型原始输出，不做功率归一化）
-            p_pred_real_mat, p_pred_imag_mat = p_flat_ri_to_matrices(y_pred_flat_ri, usrnum=usrnum, frenum=frenum)
+            # 仅用于“保存”的逆操作：把预测P向量转回矩阵形式（不改变前面的推理/评估流程）
+            p_pred_real_mat, p_pred_imag_mat = p_flat_ri_to_matrices(y_pred_norm, usrnum=usrnum, frenum=frenum)
 
             # 严格仿照 generate 存储：每条样本追加到 Batch_Buffer
             batch_buffer_samples.append({
