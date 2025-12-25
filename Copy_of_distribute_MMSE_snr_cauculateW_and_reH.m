@@ -5,13 +5,6 @@ idx_rxtx_diedai_max =1;%%按照文章，迭代3-5次即可
 shoulian = zeros(21,4,2,1);
 idx_sadian = 0;
 
-% === 并行配置（最小改动）：默认 6 核 ===
-USE_PARALLEL = true;
-N_WORKERS = 6;
-
-% 并行模式下，shoulian 使用 assignin 写回 base（worker 无法写回主进程），因此默认关闭
-ENABLE_SHOULIAN = false;
-
 % === 新增：从 Evaluate 导出的 .mat 读取预测 P（不再迭代更新P）===
 EVAL_P_MAT_FILE = fullfile('Result_P', 'DFDCA_Evaluation_Results_TrainBatch1to5_test1_4096hidden_500epoch.mat');
 if ~exist(EVAL_P_MAT_FILE, 'file')
@@ -20,19 +13,6 @@ end
 tmp_eval = load(EVAL_P_MAT_FILE, 'Batch_Buffer');
 Eval_Buffer = tmp_eval.Batch_Buffer;
 clear tmp_eval;
-
-% 启动并行池（如已存在但核数不同，则重启）
-if USE_PARALLEL
-    try
-        poolobj = gcp('nocreate');
-        if isempty(poolobj) || poolobj.NumWorkers ~= N_WORKERS
-            if ~isempty(poolobj), delete(poolobj); end
-            parpool('local', N_WORKERS);
-        end
-    catch ME
-        error(['并行池启动失败，请检查并行工具箱/本地配置: ', ME.message]);
-    end
-end
 
 for sadian = 1
     idx_sadian = idx_sadian+1;
@@ -70,10 +50,6 @@ idx_snr = idx_snr + 1;
             if isempty(eval_indices)
                 continue;
             end
-
-            total_combo = numel([-10, 0, 5, 10, 15, 20]) * numel([4,10,20]);
-            combo_idx = (idx_snr - 1) * numel([4,10,20]) + idx_user;
-            fprintf('[%d/%d] SNR=%d, Usrnum=%d, Samples=%d\n', combo_idx, total_combo, snr_db, Usrnum, numel(eval_indices));
             
             %%% 1. 分布式系统设置
             K_groups = 4;
@@ -85,56 +61,45 @@ idx_snr = idx_snr + 1;
 
             % 评估的 slot 列表（与下方性能评估循环保持一致）
             tidx_list = 5:10:75;
-            n_tidx = numel(tidx_list);
-            n_eval = numel(eval_indices);
 
-            % 每个样本输出一个 tidx 曲线，最后做平均（避免覆盖）
-            cor_eval = zeros(n_eval, n_tidx);
-            dist_eval = zeros(n_eval, n_tidx);
+            % === 修复：对同一 (SNR,Usrnum) 下的多个样本做平均，避免 idx_eval 覆盖结果 ===
+            for tt = tidx_list
+                cor_total_base_tidx(idx_snr,idx_user,tt) = 0;
+                distance_base_tidx(idx_snr,idx_user,tt) = 0;
+            end
+            eval_count = 0;
 
             % 对每个样本（每组用户）分别评估：按 User_Indices 取H、用预测P算W、再恢复信道
-            t_combo = tic;
-            if USE_PARALLEL
-                global DFDCA_PROG_COUNT DFDCA_PROG_TOTAL DFDCA_PROG_SNR DFDCA_PROG_USR
-                DFDCA_PROG_COUNT = 0;
-                DFDCA_PROG_TOTAL = n_eval;
-                DFDCA_PROG_SNR = snr_db;
-                DFDCA_PROG_USR = Usrnum;
-                dq = parallel.pool.DataQueue;
-                afterEach(dq, @(~) progress_tick());
+            for idx_eval = 1:numel(eval_indices)
+                bb = Eval_Buffer(eval_indices(idx_eval));
+                current_users = double(bb.User_Indices(:).');
 
-                parfor idx_eval = 1:n_eval
-                    bb = Eval_Buffer(eval_indices(idx_eval));
-                    current_users = double(bb.User_Indices(:).');
-
-                    cor_per_t = zeros(1, n_tidx);
-                    dist_per_t = zeros(1, n_tidx);
-                    % === A. 根据索引从 H_wcnc 取对应用户，并做归一化（沿用原归一化方式）===
-                    H_intial2_tmp = zeros(Antnum,Usrnum,Frenum,Slotnum);
-                    for u_local = 1:Usrnum
-                        u_global = current_users(u_local);
-                        H_intial2_tmp(:,u_local,:,:) = H_wcnc(:,u_global,1:Frenum,1:Slotnum);
-                    end
-                    for usr = 1:Usrnum
-                        for ant = 1:Antnum
-                            H_intial2_tmp_power1 = squeeze(H_intial2_tmp(ant,usr,:,:));
-                            H_intial2_tmp_power = sqrt(trace(H_intial2_tmp_power1'*H_intial2_tmp_power1)/Frenum/Slotnum);
-                            if H_intial2_tmp_power > 0
-                                H_intial2_tmp(ant,usr,:,:) = squeeze(H_intial2_tmp(ant,usr,:,:))./H_intial2_tmp_power;
-                            end
-                        end
-                    end
-
-                    % === B. 移位 (对到0的位置)（原逻辑保留）===
-                    k_initial = 0:Frenum-1; 
-                    WN = exp(-1i*2*pi/Frenum);
-                    H_intial2 = zeros(Antnum, Usrnum, Frenum, Slotnum);
+                % === A. 根据索引从 H_wcnc 取对应用户，并做归一化（沿用原归一化方式）===
+                H_intial2_tmp = zeros(Antnum,Usrnum,Frenum,Slotnum);
+                for u_local = 1:Usrnum
+                    u_global = current_users(u_local);
+                    H_intial2_tmp(:,u_local,:,:) = H_wcnc(:,u_global,1:Frenum,1:Slotnum);
+                end
+                for usr = 1:Usrnum
                     for ant = 1:Antnum
-                        for usr = 1:Usrnum
-                            D2 = WN.^ (k_initial*(usr-1)*k0);
-                            H_intial2(ant,usr,:,:) = transpose(D2).*squeeze(H_intial2_tmp(ant,usr,:,:));
+                        H_intial2_tmp_power1 = squeeze(H_intial2_tmp(ant,usr,:,:));
+                        H_intial2_tmp_power = sqrt(trace(H_intial2_tmp_power1'*H_intial2_tmp_power1)/Frenum/Slotnum);
+                        if H_intial2_tmp_power > 0
+                            H_intial2_tmp(ant,usr,:,:) = squeeze(H_intial2_tmp(ant,usr,:,:))./H_intial2_tmp_power;
                         end
                     end
+                end
+
+                % === B. 移位 (对到0的位置)（原逻辑保留）===
+                k_initial = 0:Frenum-1; 
+                WN = exp(-1i*2*pi/Frenum);
+                H_intial2 = zeros(Antnum, Usrnum, Frenum, Slotnum);
+                for ant = 1:Antnum
+                    for usr = 1:Usrnum
+                        D2 = WN.^ (k_initial*(usr-1)*k0);
+                        H_intial2(ant,usr,:,:) = transpose(D2).*squeeze(H_intial2_tmp(ant,usr,:,:));
+                    end
+                end
 
 %%求统计信道                   
 %%% 2. R, U, c_2 本地化 (此段逻辑已验证正确)
@@ -194,9 +159,7 @@ noise_power = noise_power_tmp/length(5:10:75)*0.9;
 for idx_rxtx_diedai = 1:idx_rxtx_diedai_max
 
     % 保存shoulian的逻辑现在统一使用辅助函数，避免代码重复
-    if ENABLE_SHOULIAN
-        calculate_and_save_mse(idx_rxtx_diedai*2-1, P,W,R,U,c_2,k,noise_power,K_groups,Frenum,Usrnum,shoulian,idx_user,idx_snr,idx_sadian);
-    end
+    calculate_and_save_mse(idx_rxtx_diedai*2-1, P,W,R,U,c_2,k,noise_power,K_groups,Frenum,Usrnum,shoulian,idx_user,idx_snr,idx_sadian);
 
 %接收端 (此段逻辑已验证正确)
 for k_group = 1:K_groups
@@ -210,9 +173,7 @@ for k_group = 1:K_groups
     end, end
 end
 
-    if ENABLE_SHOULIAN
-        calculate_and_save_mse(idx_rxtx_diedai*2, P,W,R,U,c_2,k,noise_power,K_groups,Frenum,Usrnum,shoulian,idx_user,idx_snr,idx_sadian);
-    end
+    calculate_and_save_mse(idx_rxtx_diedai*2, P,W,R,U,c_2,k,noise_power,K_groups,Frenum,Usrnum,shoulian,idx_user,idx_snr,idx_sadian);
 
 %发送端
 %发送端
@@ -279,10 +240,9 @@ end
 
 %%%计算性能
 
-for tpos = 1:n_tidx
-    tidx = tidx_list(tpos);%第几个slot
-    cor_total_tianxian = 0;
-    distance_tianxian = 0;
+for tidx = 5:10:75%第几个slot
+cor_total_tianxian = 0;
+distance_tianxian = 0;
 
 H_tidx = squeeze(H_intial2(:,1:Usrnum,:,tidx));
 R_tidx2 = H_tidx.*conj(H_tidx);
@@ -367,25 +327,21 @@ cor_total_tianxian=cor_total_tianxian+sum(abs(cor))/Usrnum;
 distance_tianxian=distance_tianxian+sum(abs(distance))/Usrnum;
 end% tianxian结束
 abs(cor);
-cor_per_t(tpos) = cor_total_tianxian/Antnum;
-dist_per_t(tpos) = distance_tianxian/Antnum;
+cor_total_base_tidx(idx_snr,idx_user,tidx)=cor_total_base_tidx(idx_snr,idx_user,tidx)+cor_total_tianxian/Antnum;
+distance_base_tidx(idx_snr,idx_user,tidx)=distance_base_tidx(idx_snr,idx_user,tidx)+distance_tianxian/Antnum;
 end % 时隙结束
 
-                    cor_eval(idx_eval,:) = cor_per_t;
-                    dist_eval(idx_eval,:) = dist_per_t;
-                    send(dq, 1);
-                end % parfor idx_eval
-            else
-                error('USE_PARALLEL=false：当前脚本仅保留并行实现，请开启并行工具箱/并行池。');
-            end
+                eval_count = eval_count + 1;
 
-            % 汇总：对同一 (SNR,Usrnum) 下所有样本取平均
-            for tpos = 1:n_tidx
-                tidx = tidx_list(tpos);
-                cor_total_base_tidx(idx_snr,idx_user,tidx) = mean(cor_eval(:,tpos));
-                distance_base_tidx(idx_snr,idx_user,tidx) = mean(dist_eval(:,tpos));
+            end % idx_eval
+
+            % 将累加结果取平均
+            if eval_count > 0
+                for tt = tidx_list
+                    cor_total_base_tidx(idx_snr,idx_user,tt) = cor_total_base_tidx(idx_snr,idx_user,tt) / eval_count;
+                    distance_base_tidx(idx_snr,idx_user,tt) = distance_base_tidx(idx_snr,idx_user,tt) / eval_count;
+                end
             end
-            fprintf('  完成: SNR=%d, Usrnum=%d, Elapsed=%.1fs\n', snr_db, Usrnum, toc(t_combo));
 
         end
     end
@@ -431,17 +387,4 @@ function calculate_and_save_mse(index, P,W,R,U,c_2,k,noise_power,K_groups,Frenum
     shoulian_ref(index,idx_user,idx_snr,idx_sadian) = total_mse / total_c2;
     % 将结果写回主工作区
     assignin('base', 'shoulian', shoulian_ref);
-end
-
-% 并行进度打印（由 DataQueue 回调触发）
-function progress_tick()
-    global DFDCA_PROG_COUNT DFDCA_PROG_TOTAL DFDCA_PROG_SNR DFDCA_PROG_USR
-    DFDCA_PROG_COUNT = DFDCA_PROG_COUNT + 1;
-    if isempty(DFDCA_PROG_TOTAL) || DFDCA_PROG_TOTAL <= 0
-        return;
-    end
-    step = max(1, floor(double(DFDCA_PROG_TOTAL) / 10));
-    if DFDCA_PROG_COUNT == 1 || mod(DFDCA_PROG_COUNT, step) == 0 || DFDCA_PROG_COUNT == DFDCA_PROG_TOTAL
-        fprintf('    [并行进度] SNR=%d, Usrnum=%d: %d/%d 样本完成\n', DFDCA_PROG_SNR, DFDCA_PROG_USR, DFDCA_PROG_COUNT, DFDCA_PROG_TOTAL);
-    end
 end
