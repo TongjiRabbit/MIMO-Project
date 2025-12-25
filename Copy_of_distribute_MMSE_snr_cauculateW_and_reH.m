@@ -1,6 +1,16 @@
 clc;
 clear all;
 close all;
+
+% === 并行池初始化（6核）===
+NUM_WORKERS = 4;
+if isempty(gcp('nocreate'))
+    parpool('local', NUM_WORKERS);
+else
+    poolobj = gcp('nocreate');
+    fprintf('已存在并行池，workers = %d\n', poolobj.NumWorkers);
+end
+
 idx_rxtx_diedai_max =1;%%按照文章，迭代3-5次即可
 shoulian = zeros(21,4,2,1);
 idx_sadian = 0;
@@ -70,7 +80,15 @@ idx_snr = idx_snr + 1;
             eval_count = 0;
 
             % 对每个样本（每组用户）分别评估：按 User_Indices 取H、用预测P算W、再恢复信道
-            for idx_eval = 1:numel(eval_indices)
+            num_samples = numel(eval_indices);
+            combo_idx = (idx_snr - 1) * 3 + idx_user;
+            fprintf('[%d/18] SNR=%d, Usrnum=%d, Samples=%d 开始...\n', combo_idx, snr_db, Usrnum, num_samples);
+            
+            % 预分配每样本结果（用于parfor sliced output）
+            cor_per_sample = zeros(num_samples, numel(tidx_list));
+            dist_per_sample = zeros(num_samples, numel(tidx_list));
+            
+            parfor idx_eval = 1:num_samples
                 bb = Eval_Buffer(eval_indices(idx_eval));
                 current_users = double(bb.User_Indices(:).');
 
@@ -147,8 +165,8 @@ W = ones(Usrnum,k,Frenum, K_groups)/sqrt(Frenum);
 
 %%计算噪声
 noise_power_tmp = 0;
-for tidx = 5:10:75
-    H_tidx = squeeze(H_intial2(:,1:Usrnum,:,tidx));
+for tidx_noise = 5:10:75
+    H_tidx = squeeze(H_intial2(:,1:Usrnum,:,tidx_noise));
     signal_power = sum(abs(H_tidx(:)).^2)/numel(H_tidx);
     sol_snr = 10^(snr_db/10);
     noise_power_tmp = noise_power_tmp+sqrt(signal_power/sol_snr);
@@ -240,11 +258,14 @@ end
 
 %%%计算性能
 
-for tidx = 5:10:75%第几个slot
+cor_tidx_tmp = zeros(1, numel(tidx_list));
+dist_tidx_tmp = zeros(1, numel(tidx_list));
+for tt_idx = 1:numel(tidx_list)
+cur_tidx = tidx_list(tt_idx);  % 改名避免parfor变量冲突
 cor_total_tianxian = 0;
 distance_tianxian = 0;
 
-H_tidx = squeeze(H_intial2(:,1:Usrnum,:,tidx));
+H_tidx = squeeze(H_intial2(:,1:Usrnum,:,cur_tidx));
 R_tidx2 = H_tidx.*conj(H_tidx);
 signal_power = sum(sum(sum(R_tidx2)))/Frenum/Antnum/Usrnum;
 sol_snr = 10^(snr_db/10);  %10*log10(x)=snr  x = exp(snr/10)
@@ -255,10 +276,11 @@ t = 0:1/N:1-1/N;  % 时间轴
 inputSig_f =ones(N,1);%全1的输入信号
 inputSig = D_FFT*inputSig_f;
 
-channel_total_tmp = squeeze(H_intial2(tianxian,1:Usrnum,:,tidx));
+channel_total_tmp = squeeze(H_intial2(tianxian,1:Usrnum,:,cur_tidx));
 channel_total = permute(channel_total_tmp,[2,1]);
 
 %%过信道
+channel_vector_f_usr = zeros(N, Usrnum);  % parfor要求预分配
 for usridx = 1:Usrnum
     channel_vector_f_usr(:,usridx) = channel_total(:,usridx);
 end
@@ -290,13 +312,13 @@ channel_vector = ID*channel_vector_f;
 outputSig_f = channel_vector_f.*inputSig_f;%输出的频域信号
 
 
-k_group = floor((tianxian - 1) / Antnum_per_group) + 1;
+k_group_ant = floor((tianxian - 1) / Antnum_per_group) + 1;
 %%计算特征系数  恢复信道
 c = zeros(Usrnum,k); % 初始化
 for i = 1:Usrnum
     for j = 1:k
-            % MODIFIED: 從4維的W矩陣中，選取隸屬當前天線組 k_group 的濾波器
-            w_vec = squeeze(W(i,j,:,k_group));
+            % MODIFIED: 從4維的W矩陣中，選取隸屬當前天線組 k_group_ant 的濾波器
+            w_vec = squeeze(W(i,j,:,k_group_ant));
             c(i,j) = w_vec' * outputSig_f;
             A=1;
     end
@@ -305,8 +327,8 @@ end
 outputSig_f_tezheng = zeros(N,Usrnum);
 for i = 1:Usrnum
     for j = 1:k
-        % MODIFIED: 從4維的U矩陣中，選取隸屬當前天線組 k_group 的特徵基
-        u_vec = squeeze(U(:,j,i,k_group));
+        % MODIFIED: 從4維的U矩陣中，選取隸屬當前天線組 k_group_ant 的特徵基
+        u_vec = squeeze(U(:,j,i,k_group_ant));
         outputSig_f_tezheng(:,i) = outputSig_f_tezheng(:,i) + c(i,j) * u_vec;
     end
 end
@@ -327,19 +349,25 @@ cor_total_tianxian=cor_total_tianxian+sum(abs(cor))/Usrnum;
 distance_tianxian=distance_tianxian+sum(abs(distance))/Usrnum;
 end% tianxian结束
 abs(cor);
-cor_total_base_tidx(idx_snr,idx_user,tidx)=cor_total_base_tidx(idx_snr,idx_user,tidx)+cor_total_tianxian/Antnum;
-distance_base_tidx(idx_snr,idx_user,tidx)=distance_base_tidx(idx_snr,idx_user,tidx)+distance_tianxian/Antnum;
+cor_tidx_tmp(tt_idx) = cor_total_tianxian/Antnum;
+dist_tidx_tmp(tt_idx) = distance_tianxian/Antnum;
 end % 时隙结束
 
-                eval_count = eval_count + 1;
+                cor_per_sample(idx_eval, :) = cor_tidx_tmp;
+                dist_per_sample(idx_eval, :) = dist_tidx_tmp;
 
-            end % idx_eval
+            end % parfor idx_eval
+            
+            fprintf('[%d/18] SNR=%d, Usrnum=%d 完成\n', combo_idx, snr_db, Usrnum);
 
-            % 将累加结果取平均
-            if eval_count > 0
-                for tt = tidx_list
-                    cor_total_base_tidx(idx_snr,idx_user,tt) = cor_total_base_tidx(idx_snr,idx_user,tt) / eval_count;
-                    distance_base_tidx(idx_snr,idx_user,tt) = distance_base_tidx(idx_snr,idx_user,tt) / eval_count;
+            % 将parfor结果取平均写入结果矩阵
+            if num_samples > 0
+                mean_cor = mean(cor_per_sample, 1);
+                mean_dist = mean(dist_per_sample, 1);
+                for tt_idx = 1:numel(tidx_list)
+                    tt = tidx_list(tt_idx);
+                    cor_total_base_tidx(idx_snr,idx_user,tt) = mean_cor(tt_idx);
+                    distance_base_tidx(idx_snr,idx_user,tt) = mean_dist(tt_idx);
                 end
             end
 
