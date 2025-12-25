@@ -1,68 +1,44 @@
 clear all;
 close  all;
-load('snr_total_Traditional.mat');
-cor_total_base1 = cor_total_base(:,3);
-distance_base1 = distance_base(:,1);
 
+% === 加载 Copy_of_distribute_MMSE_snr_cauculateW_and_reH.m 导出的数据 ===
+load('snr_total_EM.mat');  % 包含 cor_total_base, distance_base
+% cor_total_base: [6 SNR点 x 3 用户数配置]
+% 列1: Usrnum=4, 列2: Usrnum=10, 列3: Usrnum=20
 
-load('guding_k4_4and20user_1MUL_SNR_cor_total_MMSE_uma_snr_sadian_1.mat');
-%load('guding_k4_10user_1MUL_SNR_cor_total_MMSE_uma_snr_sadian_1.mat');
-cor_total_base2 = cor_total_MMSE(:,2);
-distance_base2 = distance_MMSE(:,1);
+% 选择要绘制的用户数配置（1=4用户, 2=10用户, 3=20用户）
+user_col = 2;  % 默认绘制10用户的结果
+cor_curve = cor_total_base(:, user_col);
+dist_curve = distance_base(:, user_col);
 
-load('cor_total_base_uma_sadian_1_snr_20.mat');
-cor_total_base3 = cor_total_base(:,3);
-distance_base3 = distance_base(:,1);
+% SNR点与数据生成/评估一致
+x = [-10, 0, 5, 10, 15, 20];
 
-load('snr_total_EM.mat');
-cor_total_base4 = cor_total_base(:,3);
-
-idx = 6;
-% 假设x是4到10的值
-x = -10:2:20;
+% ============ 绘制相关性曲线 ============
 figure;
-% 获得当前图形窗口的句柄
 hFig = gcf;
-% 将该图形窗口的背景色设置为灰色
 set(hFig, 'Color', [1 1 1]);
 
-% 绘制第一条曲线，使用'o-'代表圆圈标记并且实线连接
-%cor_total_base(7,1)=cor_total_base(7,1)*1.1;
-tmp = cor_total_base1;
-%  tmp(6) = tmp(6) /1.018;
-%  tmp(7) = tmp(7) /1.002;
-plot(x, tmp, 'o--', 'DisplayName', 'DFDCA','LineWidth', 1);
-% 保持当前图形，以便在同一图形上绘制第二条曲线
-hold on;
+plot(x, abs(cor_curve), 'o-', 'DisplayName', 'DNN-P (预测P)', 'LineWidth', 1.5, 'MarkerSize', 8);
 
-% 绘制第二条曲线，使用'*--'代表星号标记并且虚线连接
-tmp = cor_total_base2;
-% tmp(6) = tmp(6)/1.02;
-% tmp(7) = tmp(7)*1.002;
-plot(x, tmp, '*--', 'DisplayName', 'FDCA','LineWidth', 1);
-hold on;
-tmp = cor_total_base3;
-plot(x, tmp, 'd--', 'DisplayName', 'PSOP','LineWidth', 1);
-
-hold on;
-tmp = cor_total_base4;
-plot(x, tmp, 'x--', 'DisplayName', 'EM','LineWidth', 1);
-
-% 添加图例
-legend('FontSize', 12);
-
-% 添加坐标轴标签
-xlabel('SNR');
-ylabel('MSE');% between the estimated channel and the actual channel
-
+legend('FontSize', 12, 'Location', 'best');
+xlabel('SNR (dB)', 'FontSize', 12);
+ylabel('Correlation', 'FontSize', 12);
+title('信道恢复相关性 vs SNR', 'FontSize', 14);
 grid on;
-% 添加标题
-%title('Two Curves on One Plot');
 
-% 取消保持状态，后续图形将在新窗口中绘制
-hold off;
+% ============ 绘制距离曲线 ============
+figure;
+hFig = gcf;
+set(hFig, 'Color', [1 1 1]);
 
+plot(x, abs(dist_curve), 's-', 'DisplayName', 'DNN-P (预测P)', 'LineWidth', 1.5, 'MarkerSize', 8);
 
+legend('FontSize', 12, 'Location', 'best');
+xlabel('SNR (dB)', 'FontSize', 12);
+ylabel('Distance', 'FontSize', 12);
+title('信道恢复距离 vs SNR', 'FontSize', 14);
+grid on;
 
 
 
