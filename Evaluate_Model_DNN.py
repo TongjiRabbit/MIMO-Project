@@ -12,12 +12,12 @@ MODEL_PATH = 'DFDCA_DNN_Model_TrainBatch1to5_-10to20db_gap5db_4096hidden_500epoc
 DATA_DIR = r'D:\CodeSpace\CodeOfMMSE_xUser_re_OnlyTrainToTrain\Data'
 TEST_FILES_NAME = [
 'TrainData_Batch_1.mat',
-'TrainData_Batch_2.mat',
+# 'TrainData_Batch_2.mat',
 ]
 TEST_FILES = [os.path.join(DATA_DIR, f) for f in TEST_FILES_NAME]
 
 RESULT_DIR = r'D:\CodeSpace\CodeOfMMSE_xUser_re_OnlyTrainToTrain\Result_P'
-OUTPUT_FILE_NAME = 'DFDCA_Evaluation_Results_TrainBatch1to5_test1to2_4096hidden_500epoch.mat'        # 导出的结果文件
+OUTPUT_FILE_NAME = 'DFDCA_Evaluation_Results_TrainBatch1to5_test1_4096hidden_500epoch.mat'        # 导出的结果文件
 OUTPUT_FILE = os.path.join(RESULT_DIR, OUTPUT_FILE_NAME)
 
 HIDDEN_SIZE = 4096                                  # 必须与 Model.py 一致
@@ -28,22 +28,20 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class ChannelNet(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(ChannelNet, self).__init__()
-        self.layer1 = nn.Sequential(
+        self.model = nn.Sequential(
             nn.Linear(input_dim, HIDDEN_SIZE),
             nn.BatchNorm1d(HIDDEN_SIZE),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2),
+            nn.BatchNorm1d(HIDDEN_SIZE // 2),
+            nn.ReLU(),
+            nn.Linear(HIDDEN_SIZE // 2, HIDDEN_SIZE // 4),
+            nn.ReLU(),
+            nn.Linear(HIDDEN_SIZE // 4, output_dim)
         )
-        self.layer2 = nn.Sequential(
-            nn.Linear(HIDDEN_SIZE, 4096),
-            nn.BatchNorm1d(4096),
-            nn.ReLU()
-        )
-        self.output_layer = nn.Linear(4096, output_dim)
 
     def forward(self, x):
-        x = self.layer1(x)
-        x = self.layer2(x)
-        return self.output_layer(x)
+        return self.model(x)
 
 def calculate_metrics(p_pred_complex, p_true_complex):
     """ 计算单个样本的 MSE 和 余弦相似度 """
@@ -107,6 +105,51 @@ def normalize_p_pred_flat_ri(y_pred_flat_ri, usrnum, frenum, eps=1e-9):
     p_imag_norm = np.imag(p_complex).reshape(-1, order='C')
     return np.concatenate((p_real_norm, p_imag_norm))
 
+
+def p_flat_ri_to_matrices(y_flat_ri, usrnum, frenum):
+    """将 DNN 输出的展平 RI 拼接向量逆变换回矩阵形式。
+
+    训练时标签构造逻辑（见 Model_DNN.py）：
+    y_vec = concat(P_Real.flatten(order='C'), P_Imag.flatten(order='C'))
+    因此这里严格按相同规则拆分 + reshape。
+    """
+    y_flat_ri = np.asarray(y_flat_ri)
+    half = y_flat_ri.size // 2
+    p_real = y_flat_ri[:half].reshape((usrnum, frenum), order='C')
+    p_imag = y_flat_ri[half:].reshape((usrnum, frenum), order='C')
+    return p_real, p_imag
+
+
+def build_matlab_batch_buffer(samples):
+    """严格仿照 Generate_TrainingData_realverson.m 的 Batch_Buffer(struct array) 存储形式。"""
+    dtype = [
+        ('R_Real', 'O'),
+        ('R_Imag', 'O'),
+        ('P_Real', 'O'),
+        ('P_Imag', 'O'),
+        ('P_Real_Pred', 'O'),
+        ('P_Imag_Pred', 'O'),
+        ('User_Indices', 'O'),
+        ('Noise_Power', 'O'),
+        ('SNR_dB', 'O'),
+        ('Group_ID', 'O'),
+    ]
+    batch_buffer = np.empty((1, len(samples)), dtype=dtype)
+    for i, s in enumerate(samples):
+        batch_buffer[0, i]['R_Real'] = np.asarray(s['R_Real'])
+        batch_buffer[0, i]['R_Imag'] = np.asarray(s['R_Imag'])
+        batch_buffer[0, i]['P_Real'] = np.asarray(s['P_Real'])
+        batch_buffer[0, i]['P_Imag'] = np.asarray(s['P_Imag'])
+        batch_buffer[0, i]['P_Real_Pred'] = np.asarray(s['P_Real_Pred'])
+        batch_buffer[0, i]['P_Imag_Pred'] = np.asarray(s['P_Imag_Pred'])
+        # MATLAB 侧通常是行向量；这里强制成 (1, usrnum)
+        batch_buffer[0, i]['User_Indices'] = np.asarray(s['User_Indices'], dtype=np.int64).reshape(1, -1)
+        # 标量字段按 MATLAB 保存习惯用 1x1
+        batch_buffer[0, i]['Noise_Power'] = np.asarray(s['Noise_Power'], dtype=np.float64).reshape(1, 1)
+        batch_buffer[0, i]['SNR_dB'] = np.asarray(s['SNR_dB'], dtype=np.float64).reshape(1, 1)
+        batch_buffer[0, i]['Group_ID'] = np.asarray(s['Group_ID'], dtype=np.float64).reshape(1, 1)
+    return batch_buffer
+
 def main():
     print(f"=== DFDCA 模型验证与数据导出 ===")
     print(f"设备: {DEVICE}")
@@ -154,6 +197,9 @@ def main():
     
     print(f"\n✅ 成功合并 {total_samples} 个测试样本")
 
+    # 确保输出目录存在
+    os.makedirs(RESULT_DIR, exist_ok=True)
+
     # --- 2. 准备模型 ---
     # 读取第一个样本以确定输入输出维度
     sample_0 = all_samples[0]
@@ -185,6 +231,9 @@ def main():
     noise_power_list = []
     group_id_list = []
     user_indices_list = []
+
+    # 用于最终按 generate 脚本格式导出的 Batch_Buffer（保存“预测后”的 P 矩阵）
+    batch_buffer_samples = []
 
     print("\n开始推理计算...")
     with torch.no_grad():
@@ -251,6 +300,25 @@ def main():
             user_idx = _extract_user_indices(sample, usrnum=usrnum)
             user_indices_list.append(user_idx if user_idx is not None else np.zeros((usrnum,), dtype=np.int64))
 
+            # 仅用于“保存”的逆操作：把预测P向量转回矩阵形式（不改变前面的推理/评估流程）
+            p_pred_real_mat, p_pred_imag_mat = p_flat_ri_to_matrices(y_pred_norm, usrnum=usrnum, frenum=frenum)
+
+            # 严格仿照 generate 存储：每条样本追加到 Batch_Buffer
+            batch_buffer_samples.append({
+                'R_Real': r_real,
+                'R_Imag': r_imag,
+                # 真值（保持与 generate 脚本字段一致）
+                'P_Real': p_real_true,
+                'P_Imag': p_imag_true,
+                # 预测值（新增字段）
+                'P_Real_Pred': p_pred_real_mat,
+                'P_Imag_Pred': p_pred_imag_mat,
+                'User_Indices': user_idx if user_idx is not None else np.zeros((usrnum,), dtype=np.int64),
+                'Noise_Power': _extract_scalar(sample, 'Noise_Power', default=np.nan),
+                'SNR_dB': snr_val,
+                'Group_ID': _extract_scalar(sample, 'Group_ID', default=np.nan),
+            })
+
             # 存入列表
             results_by_snr[snr_val]['mse'].append(mse)
             results_by_snr[snr_val]['sim'].append(sim)
@@ -292,33 +360,9 @@ def main():
         print(f"{snr:<10} | {avg_mse:<10.5f} | {avg_sim:<10.5f}| {avg_pwr:<10.5f}")
 
     # --- 5. 导出到 .mat 文件 ---
-    p_pred_flat_ri = np.stack(p_pred_flat_ri_list, axis=0) if p_pred_flat_ri_list else np.zeros((0, output_dim))
-    p_true_flat_ri = np.stack(p_true_flat_ri_list, axis=0) if p_true_flat_ri_list else np.zeros((0, output_dim))
-    user_indices = np.stack(user_indices_list, axis=0) if user_indices_list else np.zeros((0, 0), dtype=np.int64)
-
-    export_data = {
-        # 基础配置
-        'Model_Path': MODEL_PATH,
-        'Input_Dim': np.array([input_dim], dtype=np.int64),
-        'Output_Dim': np.array([output_dim], dtype=np.int64),
-        # 逐样本导出（顺序与 all_samples 完全一致）
-        'P_Pred_Flat_RI': p_pred_flat_ri,
-        'P_True_Flat_RI': p_true_flat_ri,
-        'SNR_dB': np.array(snr_db_list, dtype=np.float64),
-        'Noise_Power': np.array(noise_power_list, dtype=np.float64),
-        'Group_ID': np.array(group_id_list, dtype=np.float64),
-        'User_Indices': user_indices,
-        # 按SNR统计结果（原有）
-        'SNR_Axis': np.array(snr_list),
-        'MSE_Curve': np.array(avg_mse_list),
-        'Sim_Curve': np.array(avg_sim_list),
-        # 如果需要在MATLAB里做更细致的分析（如CDF图），可以使用下面的原始数据
-        # 注意：由于不同SNR样本数可能稍有不同，scipy保存这种非对齐数据通常用object array
-        'Raw_MSE_Distribution': np.array(raw_mse_data, dtype=object),
-        'Raw_Sim_Distribution': np.array(raw_sim_data, dtype=object)
-    }
-
-    sio.savemat(OUTPUT_FILE, export_data)
-    print(f"\n✅ 数据已导出至: {OUTPUT_FILE}")
+    # 要求：严格仿照 generate 脚本，仅保存 Batch_Buffer(struct array)
+    batch_buffer = build_matlab_batch_buffer(batch_buffer_samples)
+    sio.savemat(OUTPUT_FILE, {'Batch_Buffer': batch_buffer})
+    print(f"\n✅ 已按 generate 格式导出 Batch_Buffer 至: {OUTPUT_FILE}")
 if __name__ == '__main__':
     main()
