@@ -11,7 +11,7 @@ disp('正在初始化数据生成环境...');
 disp('------------------------------------------------');
 
 % 加载信道数据
-dataFileName = 'wcnc_18_40_129_102slot_nloss.mat';
+dataFileName = fullfile('DATA', 'wcnc_18_40_129_102slot_nloss.mat');
 if exist(dataFileName, 'file')
     load(dataFileName); 
 else
@@ -27,10 +27,10 @@ H_source_total = H_wcnc(:, :, :, Training_Slot_Range);
 Target_Usrnum = 10;             % 并发用户数
 K_groups = 4;                   % 天线分簇数
 iter_max = 10;                  % MMSE 迭代次数
-SNR_List = [-10, 0, 5, 10, 15, 20]; 
+SNR_List = [-10:2:20]; %测试集选择2db间距
 
 % 建议将此处改为 1000 或 2000 以生成足够数据
-Num_Groups = 2000;              % <--- 修改：增加组数
+Num_Groups = 100;              % <--- 修改：增加组数
 Batch_Size = 100;               % <--- 新增：每100组存一次
 
 User_Groups = zeros(Num_Groups, Target_Usrnum);
@@ -258,9 +258,10 @@ for g_idx = 1:Num_Groups
     % 如果达到100组，或者已经是最后一组，就保存并清空缓冲区
     if mod(g_idx, Batch_Size) == 0 || g_idx == Num_Groups
         batch_id = ceil(g_idx / Batch_Size);
-        save_filename = sprintf('TrainData_Batch_%d.mat', batch_id);
+        save_filename = sprintf('TestData_Batch1_gap2db.mat');
         
         fprintf('   >>> [保存] 正在写入第 %d 批数据 (%s)...\n', batch_id, save_filename);
+        save_filename = fullfile('DATA', 'TestData_Batch1_gap2db.mat');
         save(save_filename, 'Batch_Buffer');
         
         % 清空缓冲区，释放内存
