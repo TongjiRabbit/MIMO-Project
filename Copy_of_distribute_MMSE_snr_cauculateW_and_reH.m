@@ -44,11 +44,13 @@ idx_snr = 0;
 for snr_db = [-10, 0, 5, 10, 15, 20]
 idx_snr = idx_snr + 1;
         idx_user = 0;
-        for Usrnum = [4,10,20]
+
+        Usrnum = 10; %%%只跑10用户
+
+        %for Usrnum = [4,10,20]   %%%多用户数时启动
             idx_user = idx_user+1;
 
             % 仅把“迭代得到的P”替换为“从 .mat 的 Batch_Buffer 取预测P”
-            % 本 Evaluate 数据通常是固定并发用户数（如10），其余用户数直接跳过
             eval_mask = false(1, numel(Eval_Buffer));
             for ii = 1:numel(Eval_Buffer)
                 snr_tmp = Eval_Buffer(ii).SNR_dB;
@@ -154,13 +156,24 @@ for usridx = 1:Usrnum, for k_group = 1:K_groups
     for k_idx=1:k, c_2(k_idx,usridx,k_group)=c_tmp(k_idx)/(Antnum_per_group*Slotnum); end
 end, end
 
+%%======初始化配置======
+% P：直接使用 Evaluate 导出的P_pre/P,记得改导出文件名
+
+%%%使用预测P版
+%isfield(bb, 'P_Real_Pred') && isfield(bb, 'P_Imag_Pred')
+%    P = bb.P_Real_Pred + 1i*bb.P_Imag_Pred;
+
+%%%使用迭代P版
+%isfield(bb, 'P_Real') && isfield(bb, 'P_Imag')
+%   P = bb.P_Real + 1i*bb.P_Imag;
 %%初始化
 % P：直接使用 Evaluate 导出的预测P（不再迭代更新P）
-if isfield(bb, 'P_Real_Pred') && isfield(bb, 'P_Imag_Pred')
-    P = bb.P_Real_Pred + 1i*bb.P_Imag_Pred;
+if isfield(bb, 'P_Real') && isfield(bb, 'P_Imag')
+    P = bb.P_Real + 1i*bb.P_Imag;
 else
-    error('Batch_Buffer 中缺少 P_Real_Pred/P_Imag_Pred 字段，请确认 Evaluate 导出格式。');
+    error('Batch_Buffer 中缺少 P_Real /P_Imag 字段，请确认 Evaluate 导出格式。');
 end
+
 W = ones(Usrnum,k,Frenum, K_groups)/sqrt(Frenum);
 
 %%计算噪声
@@ -373,15 +386,19 @@ end % 时隙结束
 
         end
     end
-end
-% 定义文件名的基础部分
-base_filename = 'user';
+%end  多用户并发的for循环的end注释
+
+
+% 取模型名（不含路径和扩展名）
+[~, model_name, ~] = fileparts(EVAL_P_MAT_FILE);
+
+base_filename = ['user_diedai' model_name];
 filename = base_filename;
 save([filename '.mat'],'cor_total_base_tidx','distance_base_tidx');
 cor_total_base=sum(cor_total_base_tidx,3)/numel(5:10:75);
 distance_base=sum(distance_base_tidx,3)/numel(5:10:75);
 
-base_filename = 'snr_total_EM';
+base_filename = ['snr_total_EM_diedai' model_name];
 filename = base_filename;
 save([filename '.mat'],'cor_total_base','distance_base');
 
